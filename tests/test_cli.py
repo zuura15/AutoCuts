@@ -15,7 +15,7 @@ from tests.synth import ffmpeg_available, write_color_video
 def test_version_matches_pyproject():
     text = Path(__file__).resolve().parents[1].joinpath("pyproject.toml").read_text()
     assert f'version = "{__version__}"' in text
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.3.1"
 
 
 def test_help_documents_sticky_hold_out(capsys):
@@ -24,6 +24,7 @@ def test_help_documents_sticky_hold_out(capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "--min-look" in out
+    assert "default 30" in out
     assert "--hold-out" in out
     assert "last-occurrence" in out
     assert "sticky" in out
@@ -76,7 +77,7 @@ def test_default_mode_is_last_occurrence(tmp_path, monkeypatch):
     assert seen["similarity"] == 0.5
     assert seen["sample_fps"] == 2
     manifest = json.loads((out / "reel_autocuts.json").read_text())
-    assert manifest["version"] == "0.3.0"
+    assert manifest["version"] == "0.3.1"
     assert manifest["mode"] == "last-occurrence"
     assert manifest["min_look"] == 10
     assert manifest["dropped"] == []
@@ -91,6 +92,24 @@ def test_default_mode_is_last_occurrence(tmp_path, monkeypatch):
     assert manifest["exports"][1]["ranges"] == [
         {"start": 20.0, "end": 30.0, "duration": 10.0},
     ]
+
+
+def test_min_look_defaults_to_30(tmp_path, monkeypatch):
+    video = tmp_path / "reel.mp4"
+    video.write_bytes(b"x")
+    seen = {}
+
+    def fake_detect(path, **kwargs):
+        seen.update(kwargs)
+        return [Interval(0.0, 40.0)]
+
+    monkeypatch.setattr("autocuts.cli.detect_last_occurrence_intervals", fake_detect)
+    monkeypatch.setattr("autocuts.cli.export_group", lambda *a, **k: None)
+    out = tmp_path / "out"
+    assert main([str(video), "-o", str(out)]) == 0
+    assert seen["min_look"] == 30
+    manifest = json.loads((out / "reel_autocuts.json").read_text())
+    assert manifest["min_look"] == 30
 
 
 def test_sticky_mode_still_available(tmp_path, monkeypatch):

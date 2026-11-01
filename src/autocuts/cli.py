@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "examples:\n"
             "  autocuts video.mp4 -o ./out\n"
-            "  autocuts video.mp4 --min-look 10 --similarity 0.5\n"
+            "  autocuts video.mp4 --min-look 15 --similarity 0.5\n"
             "  autocuts video.mp4 --mode sticky --hold-out 20\n"
             "  autocuts video.mp4 --mode adaptive --min-keep 4\n"
         ),

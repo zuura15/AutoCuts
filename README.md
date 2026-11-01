@@ -16,10 +16,10 @@ Artistic junk — a fountain, a mountain, a brief camera move — stays inside t
 autocuts /path/to/video.mp4
 # writes to /path/to/AutoCuts/
 
-autocuts video.mp4 -o ./out --min-look 10 --similarity 0.5
+autocuts video.mp4 -o ./out --min-look 15 --similarity 0.5
 ```
 
-`--min-look` (default 8s) is how long a look must run contiguously before it gets a file. A ~10s nested scene qualifies. A 2–3s flourish does not. `--similarity` (default 0.55) is the cosine match against the look's prototype. Lower it to under-split more.
+`--min-look` (default 30s) is how long a look must run contiguously before it gets a file. A shorter nest stays inside the parent unless you lower the flag. `--similarity` (default 0.55) is the cosine match against the look's prototype. Lower it to under-split more.
 
 ## Sticky mode
 

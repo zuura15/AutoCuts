@@ -44,7 +44,7 @@ def test_empty_samples():
 def test_return_after_foreign_stretch_is_one_span_first_to_last():
     # A, then a lasting foreign look, then A again. One A file covers the middle.
     samples = _repeat(A, 0, 20) + _repeat(B, 20, 20) + _repeat(A, 40, 30)
-    scenes = _run(samples, 70.0)
+    scenes = _run(samples, 70.0, min_look=8)
     assert len(scenes) == 2
     assert _span_pair(scenes[0]) == pytest.approx((0.0, 70.0))
     assert _span_pair(scenes[1]) == pytest.approx((20.0, 40.0))
@@ -65,16 +65,16 @@ def test_look_that_never_returns_ends_at_its_last_samples():
 
 
 def test_brief_blip_stays_inside_without_its_own_export():
-    samples = _repeat(A, 0, 20) + _repeat(B, 20, 3) + _repeat(A, 23, 20)
-    scenes = _run(samples, 43.0, min_look=DEFAULT_MIN_LOOK)
+    samples = _repeat(A, 0, 30) + _repeat(B, 30, 3) + _repeat(A, 33, 20)
+    scenes = _run(samples, 53.0, min_look=DEFAULT_MIN_LOOK)
     assert len(scenes) == 1
-    assert _span_pair(scenes[0]) == pytest.approx((0.0, 43.0))
-    assert scenes[0].start <= 20.0 < 23.0 <= scenes[0].end
+    assert _span_pair(scenes[0]) == pytest.approx((0.0, 53.0))
+    assert scenes[0].start <= 30.0 < 33.0 <= scenes[0].end
 
 
 def test_nested_lasting_scene_overlaps_parent_and_a_later_return():
-    # A, ~10s of distinct B, A for ~30s more, then A ends and later resumes.
-    # A is one file first→last. B is its own file, inside A's span.
+    # With min-look lowered below the 30s default, ~10s of distinct B is its
+    # own file inside A's first→last span. A later return of A extends A.
     samples = (
         _repeat(A, 0, 40)
         + _repeat(B, 40, 10)
@@ -82,7 +82,7 @@ def test_nested_lasting_scene_overlaps_parent_and_a_later_return():
         + _repeat(C, 80, 40)
         + _repeat(A, 120, 30)
     )
-    scenes = _run(samples, 150.0, min_look=DEFAULT_MIN_LOOK)
+    scenes = _run(samples, 150.0, min_look=8)
     assert len(scenes) == 3
     by_start = sorted(scenes, key=lambda s: s.start)
     assert _span_pair(by_start[0]) == pytest.approx((0.0, 150.0))  # A
@@ -176,21 +176,36 @@ def _solid_hsv(hue: int, sat: int = 200, val: int = 140, shape=(72, 128)):
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 
+def test_default_min_look_is_30_seconds():
+    assert DEFAULT_MIN_LOOK == 30.0
+    # Just under the default: the foreign look stays inside the parent.
+    short = _repeat(A, 0, 40) + _repeat(B, 40, 29) + _repeat(A, 69, 10)
+    short_scenes = _run(short, 79.0)
+    assert len(short_scenes) == 1
+    assert _span_pair(short_scenes[0]) == pytest.approx((0.0, 79.0))
+    # Exactly the default: the foreign look is its own overlapping file.
+    held = _repeat(A, 0, 40) + _repeat(B, 40, 30) + _repeat(A, 70, 10)
+    held_scenes = _run(held, 80.0)
+    assert len(held_scenes) == 2
+    assert _span_pair(held_scenes[0]) == pytest.approx((0.0, 80.0))
+    assert _span_pair(held_scenes[1]) == pytest.approx((40.0, 70.0))
+
+
 def test_histogram_nested_palette_overlaps_and_a_brightness_blip_does_not():
     red = hsv_histogram(_solid_hsv(0))
     red_dark = hsv_histogram(_solid_hsv(0, val=40))
     green = hsv_histogram(_solid_hsv(60))
-    # 20s red, 2s darker red (same look), 12s green, 15s red.
-    samples = [(float(i), red) for i in range(20)]
-    samples += [(float(i), red_dark) for i in range(20, 22)]
-    samples += [(float(i), green) for i in range(22, 34)]
-    samples += [(float(i), red) for i in range(34, 49)]
-    scenes = _run(samples, 49.0, min_look=DEFAULT_MIN_LOOK)
+    # 30s red, 2s darker red (same look), 30s green, 15s red.
+    samples = [(float(i), red) for i in range(30)]
+    samples += [(float(i), red_dark) for i in range(30, 32)]
+    samples += [(float(i), green) for i in range(32, 62)]
+    samples += [(float(i), red) for i in range(62, 77)]
+    scenes = _run(samples, 77.0, min_look=DEFAULT_MIN_LOOK)
     assert len(scenes) == 2
     assert scenes[0].start == pytest.approx(0.0)
-    assert scenes[0].end == pytest.approx(49.0)
-    assert scenes[1].start == pytest.approx(22.0)
-    assert scenes[1].end == pytest.approx(34.0)
+    assert scenes[0].end == pytest.approx(77.0)
+    assert scenes[1].start == pytest.approx(32.0)
+    assert scenes[1].end == pytest.approx(62.0)
     assert scenes[0].start < scenes[1].start < scenes[1].end < scenes[0].end
 
 

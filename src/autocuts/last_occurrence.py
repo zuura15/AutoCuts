@@ -24,10 +24,10 @@ from .sticky import (
     sample_video,
 )
 
-# A look needs a contiguous run at least this long before it is its own
-# export. ~10s of a distinct nested scene qualifies; a few-second fountain
-# or camera flourish does not.
-DEFAULT_MIN_LOOK = 8.0
+# Contiguous seconds a look must run before it is its own export.
+# 30s keeps short nests inside the parent. Pass a lower --min-look to
+# give a shorter distinct scene its own file.
+DEFAULT_MIN_LOOK = 30.0
 
 
 def _normalize(vec: np.ndarray) -> np.ndarray:
