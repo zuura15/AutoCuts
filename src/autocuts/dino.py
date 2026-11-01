@@ -1,15 +1,17 @@
 """DINOv2 dry-run look report.
 
-Embed a coarse sample of frames and group them with the same first-to-last
-rules as last-occurrence. The result is a JSON report of proposed spans.
-This path does not encode or write scene clips.
+Embed a coarse sample of frames, assign look identities, then report the
+stretches that survive the post-filter. This path does not encode or write
+scene clips.
 
-Change-points come from cosine distance to each look's running prototype,
-not from a separate segmentation model. A lasting nested look still gets
-its own overlapping span; a short run stays inside the parent.
+The default filter splits each look into contiguous stretches, rejoins a
+same-look gap of at most ``--dino-gap`` seconds, keeps the longest
+non-overlapping stretches, and drops anything shorter than ``--min-look``.
+``--dino-umbrella`` restores the raw first-to-last spans instead.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
 import cv2
@@ -31,11 +33,12 @@ DINO_MODELS = (
     "dinov2_vitl14",
     "dinov2_vitg14",
 )
-# Starting point for CLS-token cosine on DINOv2. Histogram mode stays at
-# 0.55; this space is tighter, so the dry-run default is higher. Tune it
-# against a ground-truth timeline.
-DEFAULT_DINO_SIMILARITY = 0.70
+# CLS-token cosine on DINOv2. 0.60 matched the FU10 sweep better than 0.70.
+# Histogram modes stay at 0.55.
+DEFAULT_DINO_SIMILARITY = 0.60
 DEFAULT_DINO_BATCH = 8
+# Rejoin same-look stretches when the hole between them is at most this long.
+DEFAULT_DINO_GAP = 60.0
 
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -160,6 +163,96 @@ def _look_record(
     }
 
 
+@dataclass(frozen=True)
+class Stretch:
+    """One candidate span, possibly several contiguous runs rejoined."""
+
+    look_id: int
+    start: float
+    end: float
+    runs: tuple = ()
+    reason: str | None = None
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+
+def _overlaps(left: Stretch, right: Stretch) -> bool:
+    return left.start < right.end - 1e-6 and right.start < left.end - 1e-6
+
+
+def filter_stretches(
+    pieces: Sequence[Stretch],
+    *,
+    gap: float = DEFAULT_DINO_GAP,
+    min_look: float = DEFAULT_MIN_LOOK,
+) -> tuple[list[Stretch], list[Stretch]]:
+    """Turn contiguous pieces into the default dino spans.
+
+    Pieces of one ``look_id`` rejoin when the hole between them is at most
+    ``gap`` seconds. Overlapping candidates then compete: longer duration
+    wins, ties go to the earlier start. Survivors shorter than ``min_look``
+    are dropped. Returned kept stretches are in start order.
+    """
+    if gap < 0:
+        raise ValueError("gap must be >= 0")
+    if min_look <= 0:
+        raise ValueError("min_look must be positive")
+
+    by_look: dict[int, list[Stretch]] = {}
+    for piece in pieces:
+        by_look.setdefault(piece.look_id, []).append(piece)
+
+    merged: list[Stretch] = []
+    for look_id, runs in by_look.items():
+        ordered = sorted(runs, key=lambda run: (run.start, run.end))
+        current = ordered[0]
+        for nxt in ordered[1:]:
+            hole = nxt.start - current.end
+            if hole <= gap + 1e-6:
+                current = Stretch(
+                    look_id,
+                    current.start,
+                    max(current.end, nxt.end),
+                    current.runs + nxt.runs,
+                )
+            else:
+                merged.append(current)
+                current = nxt
+        merged.append(current)
+
+    ranked = sorted(merged, key=lambda item: (-item.duration, item.start, item.look_id))
+    accepted: list[Stretch] = []
+    skipped: list[Stretch] = []
+    for candidate in ranked:
+        if any(_overlaps(candidate, kept) for kept in accepted):
+            skipped.append(Stretch(
+                candidate.look_id,
+                candidate.start,
+                candidate.end,
+                candidate.runs,
+                "overlap",
+            ))
+        else:
+            accepted.append(candidate)
+
+    kept: list[Stretch] = []
+    for candidate in accepted:
+        if candidate.duration + 1e-6 < min_look:
+            skipped.append(Stretch(
+                candidate.look_id,
+                candidate.start,
+                candidate.end,
+                candidate.runs,
+                "short",
+            ))
+        else:
+            kept.append(candidate)
+    kept.sort(key=lambda item: (item.start, item.look_id))
+    return kept, skipped
+
+
 def _nesting(looks: list[dict]) -> None:
     for look in looks:
         look["nested_in"] = []
@@ -181,6 +274,54 @@ def _nesting(looks: list[dict]) -> None:
                 outer["contains"].append(inner["id"])
 
 
+def _runs_payload(stretch: Stretch, frames: Sequence[int], native_fps: float, frame_count: int | None) -> list[dict]:
+    payload = []
+    for run in stretch.runs:
+        run_start = int(frames[run.first_index])
+        run_end = _frame_at(run.end, native_fps, frame_count)
+        if run_end < run_start:
+            run_end = run_start
+        payload.append({
+            "start": run.start,
+            "end": run.end,
+            "duration": run.duration,
+            "start_frame": run_start,
+            "end_frame": run_end,
+        })
+    return payload
+
+
+def _stretch_record(
+    stretch: Stretch,
+    report_id: int,
+    frames: Sequence[int],
+    native_fps: float,
+    frame_count: int | None,
+) -> dict:
+    if stretch.runs:
+        start_frame = int(frames[stretch.runs[0].first_index])
+    else:
+        start_frame = _frame_at(stretch.start, native_fps, frame_count)
+    end_frame = _frame_at(stretch.end, native_fps, frame_count)
+    if end_frame < start_frame:
+        end_frame = start_frame
+    record = {
+        "id": report_id,
+        "look_id": int(stretch.look_id) + 1,
+        "start": stretch.start,
+        "end": stretch.end,
+        "duration": stretch.duration,
+        "start_frame": start_frame,
+        "end_frame": end_frame,
+        "runs": _runs_payload(stretch, frames, native_fps, frame_count),
+        "nested_in": [],
+        "contains": [],
+    }
+    if stretch.reason:
+        record["reason"] = stretch.reason
+    return record
+
+
 def build_dino_report(
     samples: Sequence[tuple[float, np.ndarray]],
     *,
@@ -196,11 +337,16 @@ def build_dino_report(
     model: str = DEFAULT_DINO_MODEL,
     device: str = "cpu",
     source: str = "",
+    gap: float = DEFAULT_DINO_GAP,
+    umbrella: bool = False,
 ) -> dict:
     """Group embedding samples into a dry-run look report.
 
     ``samples`` are ``(time_seconds, embedding)``. ``frames`` aligns with
     them; when omitted, frame numbers are ``round(time * native_fps)``.
+
+    The default path reports filtered stretches. ``umbrella=True`` reports
+    each lasting look's raw first-to-last span instead.
     """
     if native_fps <= 0:
         raise ValueError("native_fps must be positive")
@@ -220,21 +366,44 @@ def build_dino_report(
         sample_interval=sample_interval,
         duration=duration,
     )
-    lasting = [group for group in grouped if group.lasting]
-    skipped = [group for group in grouped if not group.lasting]
-    looks = [
-        _look_record(group, i, frame_list, native_fps, frame_count)
-        for i, group in enumerate(lasting, start=1)
-    ]
-    _nesting(looks)
-    skipped_looks = [
-        _look_record(group, i, frame_list, native_fps, frame_count)
-        for i, group in enumerate(skipped, start=1)
-    ]
+    if umbrella:
+        lasting = [group for group in grouped if group.lasting]
+        skipped_groups = [group for group in grouped if not group.lasting]
+        looks = [
+            _look_record(group, i, frame_list, native_fps, frame_count)
+            for i, group in enumerate(lasting, start=1)
+        ]
+        for look, group in zip(looks, lasting):
+            look["look_id"] = group.creation_index + 1
+        _nesting(looks)
+        skipped_looks = [
+            _look_record(group, i, frame_list, native_fps, frame_count)
+            for i, group in enumerate(skipped_groups, start=1)
+        ]
+        for skipped, group in zip(skipped_looks, skipped_groups):
+            skipped["look_id"] = group.creation_index + 1
+            skipped["reason"] = "short"
+    else:
+        pieces = [
+            Stretch(group.creation_index, run.start, run.end, (run,))
+            for group in grouped
+            for run in group.runs
+        ]
+        kept, dropped = filter_stretches(pieces, gap=gap, min_look=min_look)
+        looks = [
+            _stretch_record(stretch, i, frame_list, native_fps, frame_count)
+            for i, stretch in enumerate(kept, start=1)
+        ]
+        skipped_looks = [
+            _stretch_record(stretch, i, frame_list, native_fps, frame_count)
+            for i, stretch in enumerate(dropped, start=1)
+        ]
     return {
         "version": __version__,
         "mode": "dino",
         "dry_run": True,
+        "filter": "umbrella" if umbrella else "stretch",
+        "dino_gap": None if umbrella else float(gap),
         "source": source,
         "model": model,
         "device": device,
@@ -253,9 +422,12 @@ def build_dino_report(
 def format_dino_summary(report: dict) -> str:
     """Human-readable list of proposed look spans."""
     looks = report.get("looks") or []
-    lines = [f"lasting looks: {len(looks)}"]
+    kind = report.get("filter") or "stretch"
+    lines = [f"lasting looks: {len(looks)}  ({kind})"]
     for look in looks:
         extra = []
+        if look.get("look_id") not in (None, look["id"]):
+            extra.append(f"identity {look['look_id']}")
         if look.get("nested_in"):
             extra.append("nested in " + ",".join(str(i) for i in look["nested_in"]))
         if look.get("contains"):
@@ -356,6 +528,8 @@ def detect_dino_report(
     model_name: str = DEFAULT_DINO_MODEL,
     device: str = "auto",
     batch_size: int = DEFAULT_DINO_BATCH,
+    gap: float = DEFAULT_DINO_GAP,
+    umbrella: bool = False,
     on_progress: Callable[[float, float], None] | None = None,
 ) -> dict:
     """Sample ``path``, embed with DINOv2, and return a dry-run report."""
@@ -383,4 +557,6 @@ def detect_dino_report(
         model=model_name,
         device=chosen,
         source=path,
+        gap=gap,
+        umbrella=umbrella,
     )

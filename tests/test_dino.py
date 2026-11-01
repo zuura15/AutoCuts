@@ -8,8 +8,11 @@ import pytest
 
 from autocuts.cli import main
 from autocuts.dino import (
+    DEFAULT_DINO_GAP,
     DEFAULT_DINO_SIMILARITY,
+    Stretch,
     build_dino_report,
+    filter_stretches,
     format_dino_summary,
     preprocess_bgr,
     resolve_device,
@@ -53,7 +56,7 @@ def _report(pieces, **kwargs):
 
 
 def test_return_after_foreign_stretch_is_one_span_with_frames():
-    report = _report([(A, 40), (B, 30), (A, 20)])
+    report = _report([(A, 40), (B, 30), (A, 20)], umbrella=True)
     assert report["dry_run"] is True
     assert report["mode"] == "dino"
     assert len(report["looks"]) == 2
@@ -95,24 +98,115 @@ def test_brief_blip_is_skipped_and_stays_inside_the_parent():
 
 
 def test_default_min_look_keeps_30s_and_drops_29s():
-    short = _report([(A, 40), (B, 29), (A, 10)])
+    short = _report([(A, 40), (B, 29), (A, 10)], umbrella=True)
     assert len(short["looks"]) == 1
     assert len(short["skipped_looks"]) == 1
     assert short["min_look"] == 30.0
 
-    held = _report([(A, 40), (B, 30), (A, 10)])
+    held = _report([(A, 40), (B, 30), (A, 10)], umbrella=True)
     assert len(held["looks"]) == 2
     assert held["looks"][1]["duration"] == pytest.approx(30.0)
     assert held["looks"][1]["nested_in"] == [held["looks"][0]["id"]]
 
 
 def test_summary_names_frames_and_nesting():
-    report = _report([(A, 40), (B, 30), (A, 10)])
+    report = _report([(A, 40), (B, 30), (A, 10)], umbrella=True)
     text = format_dino_summary(report)
     assert "frames 0-800" in text
     assert "frames 400-700" in text
     assert "nested in 1" in text
     assert "contains 2" in text
+
+
+def _piece(look_id, start, end):
+    return Stretch(look_id, start, end)
+
+
+def test_filter_drops_the_first_last_umbrella():
+    # A returns long after the gap limit, so the 0–250 umbrella is not a span.
+    kept, skipped = filter_stretches(
+        [_piece(1, 0, 40), _piece(1, 200, 250), _piece(2, 40, 80)],
+        gap=60,
+        min_look=30,
+    )
+    assert [(item.look_id, item.start, item.end) for item in kept] == [
+        (1, 0, 40),
+        (2, 40, 80),
+        (1, 200, 250),
+    ]
+    assert skipped == []
+    assert all(item.end - item.start < 250 for item in kept)
+
+
+def test_filter_rejoins_a_short_gap():
+    kept, skipped = filter_stretches(
+        [_piece(1, 0, 40), _piece(2, 40, 55), _piece(1, 55, 100)],
+        gap=60,
+        min_look=30,
+    )
+    assert len(kept) == 1
+    assert kept[0].look_id == 1
+    assert (kept[0].start, kept[0].end) == (0, 100)
+    assert len(skipped) == 1
+    assert skipped[0].reason == "overlap"
+    # A hole of exactly 60s still rejoins; 61s stays split.
+    joined, _ = filter_stretches(
+        [_piece(1, 0, 40), _piece(1, 100, 140)],
+        gap=60,
+        min_look=30,
+    )
+    assert len(joined) == 1
+    assert (joined[0].start, joined[0].end) == (0, 140)
+    split, _ = filter_stretches(
+        [_piece(1, 0, 40), _piece(1, 101, 141)],
+        gap=60,
+        min_look=30,
+    )
+    assert [(item.start, item.end) for item in split] == [(0, 40), (101, 141)]
+
+
+def test_filter_greedy_keeps_the_longest_nonoverlapping():
+    kept, skipped = filter_stretches(
+        [
+            _piece(1, 0, 100),
+            _piece(2, 10, 50),
+            _piece(3, 110, 150),
+        ],
+        gap=60,
+        min_look=30,
+    )
+    assert [(item.look_id, item.start, item.end) for item in kept] == [
+        (1, 0, 100),
+        (3, 110, 150),
+    ]
+    assert [(item.look_id, item.reason) for item in skipped] == [(2, "overlap")]
+
+
+def test_filter_min_look_drops_a_short_survivor():
+    kept, skipped = filter_stretches(
+        [_piece(1, 0, 29), _piece(2, 100, 130)],
+        gap=60,
+        min_look=30,
+    )
+    assert [(item.look_id, item.start, item.end) for item in kept] == [(2, 100, 130)]
+    assert [(item.look_id, item.reason) for item in skipped] == [(1, "short")]
+
+
+def test_default_report_uses_the_stretch_filter():
+    report = _report([(A, 40), (B, 30), (A, 20)])
+    assert report["filter"] == "stretch"
+    assert report["dino_gap"] == DEFAULT_DINO_GAP
+    assert report["similarity"] == pytest.approx(0.60)
+    assert len(report["looks"]) == 1
+    parent = report["looks"][0]
+    assert parent["start"] == pytest.approx(0.0)
+    assert parent["end"] == pytest.approx(90.0)
+    assert parent["start_frame"] == 0
+    assert parent["end_frame"] == 900
+    assert len(parent["runs"]) == 2
+    assert report["looks"][0]["nested_in"] == []
+    assert len(report["skipped_looks"]) == 1
+    assert report["skipped_looks"][0]["reason"] == "overlap"
 
 
 def test_preprocess_is_imagenet_chw():
@@ -176,7 +270,9 @@ def test_dino_mode_writes_a_report_and_no_scene_files(tmp_path, monkeypatch, cap
         str(video), "-o", str(out), "--mode", "dino", "--min-look", "30",
     ]) == 0
     assert seen["min_look"] == 30
-    assert seen["similarity"] == pytest.approx(DEFAULT_DINO_SIMILARITY)
+    assert seen["similarity"] == pytest.approx(0.60)
+    assert seen["gap"] == DEFAULT_DINO_GAP
+    assert seen["umbrella"] is False
     assert seen["model_name"] == "dinov2_vits14"
     report_path = out / "reel_dino.json"
     report = json.loads(report_path.read_text())

@@ -9,6 +9,7 @@ from pathlib import Path
 from . import __version__
 from .dino import (
     DEFAULT_DINO_BATCH,
+    DEFAULT_DINO_GAP,
     DEFAULT_DINO_MODEL,
     DEFAULT_DINO_SIMILARITY,
     DINO_MODELS,
@@ -76,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  autocuts video.mp4 --mode sticky --hold-out 20\n"
             "  autocuts video.mp4 --mode adaptive --min-keep 4\n"
             "  autocuts video.mp4 --mode dino -o ./out\n"
+            "  autocuts video.mp4 --mode dino --dino-umbrella\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -162,6 +164,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--dino-batch", type=_bounded_int("dino-batch", 1, 64), default=None,
         help=f"Dino only. Embedding batch size (default {DEFAULT_DINO_BATCH})",
     )
+    p.add_argument(
+        "--dino-gap",
+        type=_bounded_float("dino-gap", 0.0, 3600.0),
+        default=None,
+        help=(
+            "Dino filter only. Rejoin stretches of the same look when the "
+            f"gap between them is at most this many seconds (default {DEFAULT_DINO_GAP:g})"
+        ),
+    )
+    p.add_argument(
+        "--dino-umbrella",
+        action="store_true",
+        help="Dino only. Report raw first-to-last spans instead of the stretch filter",
+    )
     p.add_argument("--version", action="version", version=f"autocuts {__version__}")
     return p
 
@@ -199,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     sample_fps = DEFAULT_SAMPLE_FPS if args.sample_fps is None else args.sample_fps
     min_look = DEFAULT_MIN_LOOK if args.min_look is None else args.min_look
     dino_batch = DEFAULT_DINO_BATCH if args.dino_batch is None else args.dino_batch
+    dino_gap = DEFAULT_DINO_GAP if args.dino_gap is None else args.dino_gap
 
     print(f"AutoCuts {__version__}")
     print(f"input:  {video}")
@@ -206,8 +223,9 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.time()
     if mode == "dino":
+        shape = "umbrella" if args.dino_umbrella else f"stretch gap {dino_gap:g}s"
         print(
-            f"mode:   dino (dry-run)  model: {args.dino_model}  "
+            f"mode:   dino (dry-run, {shape})  model: {args.dino_model}  "
             f"device: {args.dino_device}  min-look: {min_look:g}s  "
             f"similarity: {similarity:g}  sample: {sample_fps:g} fps"
         )
@@ -220,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
                 model_name=args.dino_model,
                 device=args.dino_device,
                 batch_size=dino_batch,
+                gap=dino_gap,
+                umbrella=args.dino_umbrella,
                 on_progress=_progress,
             )
         except RuntimeError as exc:

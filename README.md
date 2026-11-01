@@ -23,18 +23,26 @@ autocuts video.mp4 -o ./out --min-look 15 --similarity 0.5
 
 ## DINOv2 dry-run
 
-`--mode dino` reports where lasting looks would be cut. It samples about one frame a second, embeds each frame with DINOv2, and groups those embeddings with the same first-to-last rules as last-occurrence. It writes a JSON report of frame ranges and does not encode scene files.
+`--mode dino` reports where lasting looks would be cut. It samples about one frame a second, embeds each frame with DINOv2, and writes a JSON report of frame ranges. It does not encode scene files.
 
-A look still needs `--min-look` contiguous seconds (default 30). Each lasting look spans its first sample to its last. A nested lasting look is its own overlapping span. Short transitions stay inside the parent and are listed as skipped looks.
+The default report is filtered, not a first-to-last umbrella:
 
-GPU is optional. An NVIDIA GPU such as an RTX 4070 is used when PyTorch can see it; CPU works and is slower. The first run downloads the weights. The default backbone is the small `dinov2_vits14` model. `dinov2_vitb14` is the base model. `--similarity` defaults to 0.70 in this mode (0.55 for the histogram modes) and is a starting point to tune against a ground-truth timeline.
+1. Split each look into contiguous stretches.
+2. Rejoin stretches of the same look when the gap is at most `--dino-gap` seconds (default 60).
+3. Keep the longest non-overlapping stretches.
+4. Drop whatever is shorter than `--min-look` (default 30s).
+
+`--dino-umbrella` restores the raw first-to-last spans, including nested overlaps. `--similarity` defaults to 0.60 in this mode (0.55 for the histogram modes).
+
+GPU is optional. An NVIDIA GPU such as an RTX 4070 is used when PyTorch can see it; CPU works and is slower. The first run downloads the weights. The default backbone is the small `dinov2_vits14` model. `dinov2_vitb14` is the base model.
 
 ```bash
 pip install -e ".[dino]"
 # CUDA example for an RTX 4070 (install the matching wheel, then the extra):
 # pip install torch --index-url https://download.pytorch.org/whl/cu124
 autocuts video.mp4 --mode dino -o ./out
-autocuts video.mp4 --mode dino --dino-model dinov2_vitb14 --similarity 0.65
+autocuts video.mp4 --mode dino --dino-gap 60 --similarity 0.60
+autocuts video.mp4 --mode dino --dino-umbrella
 ```
 
 ## Sticky mode

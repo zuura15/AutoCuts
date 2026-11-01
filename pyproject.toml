@@ -1,6 +1,6 @@
 [project]
 name = "autocuts"
-version = "0.4.0"
+version = "0.4.1"
 description = "Local CLI that exports one span per lasting look, from its first appearance to its last, leaving inner junk in place."
 readme = "README.md"
 requires-python = ">=3.10"
