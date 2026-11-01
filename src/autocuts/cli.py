@@ -1,4 +1,4 @@
-"""autocuts — split a compilation into sticky scenes."""
+"""autocuts — split a compilation into scenes."""
 from __future__ import annotations
 
 import argparse
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import __version__
 from .export import export_group, write_manifest
+from .last_occurrence import DEFAULT_MIN_LOOK, detect_last_occurrence_intervals
 from .logic import detect_intervals, drop_short, stitch_across_drops
 from .sticky import (
     DEFAULT_HOLD_OUT,
@@ -18,7 +19,7 @@ from .sticky import (
     detect_sticky_intervals,
 )
 
-_MODES = ("sticky", "adaptive", "content")
+_MODES = ("last-occurrence", "sticky", "adaptive", "content")
 
 
 def _bounded_float(name: str, lo: float, hi: float):
@@ -40,13 +41,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="autocuts",
         description=(
-            "Split a compilation video into scenes. The default sticky mode "
-            "under-splits: a brief zoom or lighting blip does not end a scene."
+            "Split a compilation video into scenes. The default "
+            "last-occurrence mode exports one file per lasting look, from "
+            "the first time it appears to the last, and leaves the middle "
+            "in place."
         ),
         epilog=(
             "examples:\n"
             "  autocuts video.mp4 -o ./out\n"
-            "  autocuts video.mp4 --hold-out 25 --similarity 0.5\n"
+            "  autocuts video.mp4 --min-look 10 --similarity 0.5\n"
+            "  autocuts video.mp4 --mode sticky --hold-out 20\n"
             "  autocuts video.mp4 --mode adaptive --min-keep 4\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -58,11 +62,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode", choices=_MODES, default=None,
-        help="sticky (default), or adaptive/content for the PySceneDetect path",
+        help=(
+            "last-occurrence (default), sticky, or adaptive/content "
+            "for the PySceneDetect path"
+        ),
     )
     p.add_argument(
         "--detector", choices=_MODES, default=None,
         help="Alias of --mode",
+    )
+    p.add_argument(
+        "--min-look",
+        type=_bounded_float("min-look", 1e-3, 600.0),
+        default=None,
+        help=(
+            "Last-occurrence only. Contiguous seconds a look must last to "
+            f"get its own file (default {DEFAULT_MIN_LOOK:g}). Shorter "
+            "stretches stay inside other scenes."
+        ),
     )
     p.add_argument(
         "--hold-out",
@@ -79,15 +96,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=_bounded_float("similarity", 0.0, 1.0),
         default=None,
         help=(
-            "Sticky only. Minimum cosine similarity to the scene prototype "
-            f"(default {DEFAULT_SIMILARITY:g}). Lower under-splits more."
+            "Last-occurrence and sticky. Minimum cosine similarity to a "
+            f"look's prototype (default {DEFAULT_SIMILARITY:g}). Lower "
+            "under-splits more."
         ),
     )
     p.add_argument(
         "--sample-fps",
         type=_bounded_float("sample-fps", 1e-3, 30.0),
         default=None,
-        help=f"Sticky only. Signature samples per second (default {DEFAULT_SAMPLE_FPS:g})",
+        help=(
+            "Last-occurrence and sticky. Signature samples per second "
+            f"(default {DEFAULT_SAMPLE_FPS:g})"
+        ),
     )
     p.add_argument(
         "--min-keep", type=float, default=4.0,
@@ -113,7 +134,11 @@ def _resolve_mode(args: argparse.Namespace) -> str | None:
     if args.mode is not None and args.detector is not None and args.mode != args.detector:
         print("error: --mode and --detector disagree", file=sys.stderr)
         return None
-    return args.mode or args.detector or "sticky"
+    return args.mode or args.detector or "last-occurrence"
+
+
+def _progress(at: float, duration: float) -> None:
+    print(f"  sampling {at:.0f}s / {duration:.0f}s", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -133,21 +158,38 @@ def main(argv: list[str] | None = None) -> int:
     hold_out = DEFAULT_HOLD_OUT if args.hold_out is None else args.hold_out
     similarity = DEFAULT_SIMILARITY if args.similarity is None else args.similarity
     sample_fps = DEFAULT_SAMPLE_FPS if args.sample_fps is None else args.sample_fps
+    min_look = DEFAULT_MIN_LOOK if args.min_look is None else args.min_look
 
     print(f"AutoCuts {__version__}")
     print(f"input:  {video}")
     print(f"output: {out_dir}")
 
     t0 = time.time()
-    if mode == "sticky":
+    dropped: list = []
+    if mode == "last-occurrence":
+        print(
+            f"mode:   last-occurrence  min-look: {min_look:g}s  "
+            f"similarity: {similarity:g}  sample: {sample_fps:g} fps"
+        )
+        try:
+            intervals = detect_last_occurrence_intervals(
+                str(video),
+                min_look=min_look,
+                similarity=similarity,
+                sample_fps=sample_fps,
+                on_progress=_progress,
+            )
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"lasting looks: {len(intervals)} in {time.time() - t0:.1f}s")
+        # One continuous span per look. Do not cut the middle out.
+        groups = [[iv] for iv in intervals]
+    elif mode == "sticky":
         print(
             f"mode:   sticky  hold-out: {hold_out:g}s  "
             f"similarity: {similarity:g}  sample: {sample_fps:g} fps"
         )
-
-        def _progress(at: float, duration: float) -> None:
-            print(f"  sampling {at:.0f}s / {duration:.0f}s", flush=True)
-
         try:
             intervals = detect_sticky_intervals(
                 str(video),
@@ -161,8 +203,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"sticky scenes: {len(intervals)} in {time.time() - t0:.1f}s")
         groups = [[iv] for iv in intervals]
-        dropped: list = []
-    else:
+    elif mode in ("adaptive", "content"):
         print(f"mode:   {mode}  min-keep: {args.min_keep:g}s")
         intervals = detect_intervals(
             str(video),
@@ -177,6 +218,9 @@ def main(argv: list[str] | None = None) -> int:
             groups = [[iv] for iv in _keep]
         else:
             groups = stitch_across_drops(intervals, min_keep=args.min_keep)
+    else:
+        print(f"error: unknown mode: {mode}", file=sys.stderr)
+        return 2
     print(f"export groups: {len(groups)}")
 
     stem = video.stem
@@ -202,7 +246,11 @@ def main(argv: list[str] | None = None) -> int:
         "dropped": [{"start": d.start, "end": d.end, "duration": d.duration} for d in dropped],
         "exports": exported,
     }
-    if mode == "sticky":
+    if mode == "last-occurrence":
+        manifest["min_look"] = min_look
+        manifest["similarity"] = similarity
+        manifest["sample_fps"] = sample_fps
+    elif mode == "sticky":
         manifest["hold_out"] = hold_out
         manifest["similarity"] = similarity
         manifest["sample_fps"] = sample_fps

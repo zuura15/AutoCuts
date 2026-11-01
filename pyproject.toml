@@ -1,7 +1,7 @@
 [project]
 name = "autocuts"
-version = "0.2.0"
-description = "Local CLI that splits compilation videos into sticky scenes, under-splitting through brief zooms and lighting blips."
+version = "0.3.0"
+description = "Local CLI that exports one span per lasting look, from its first appearance to its last, leaving inner junk in place."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

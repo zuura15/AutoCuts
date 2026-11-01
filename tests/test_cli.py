@@ -1,4 +1,4 @@
-"""CLI defaults: sticky is the path you get, adaptive stays available."""
+"""CLI defaults: last-occurrence is the path you get; sticky and adaptive stay available."""
 from __future__ import annotations
 
 import json
@@ -15,7 +15,7 @@ from tests.synth import ffmpeg_available, write_color_video
 def test_version_matches_pyproject():
     text = Path(__file__).resolve().parents[1].joinpath("pyproject.toml").read_text()
     assert f'version = "{__version__}"' in text
-    assert __version__ == "0.2.0"
+    assert __version__ == "0.3.0"
 
 
 def test_help_documents_sticky_hold_out(capsys):
@@ -23,7 +23,9 @@ def test_help_documents_sticky_hold_out(capsys):
         main(["-h"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
+    assert "--min-look" in out
     assert "--hold-out" in out
+    assert "last-occurrence" in out
     assert "sticky" in out
     assert "--mode" in out
 
@@ -42,7 +44,7 @@ def test_mode_and_detector_must_agree():
     assert main(["clip.mp4", "--mode", "sticky", "--detector", "adaptive"]) == 2
 
 
-def test_default_mode_is_sticky(tmp_path, monkeypatch):
+def test_default_mode_is_last_occurrence(tmp_path, monkeypatch):
     video = tmp_path / "reel.mp4"
     video.write_bytes(b"x")
     seen = {}
@@ -50,31 +52,74 @@ def test_default_mode_is_sticky(tmp_path, monkeypatch):
     def fake_detect(path, **kwargs):
         seen["path"] = path
         seen.update(kwargs)
-        return [Interval(0.0, 3.0), Interval(3.0, 40.0)]
+        # Nested looks: B sits inside A's first-to-last span. Both are exported.
+        return [Interval(0.0, 80.0), Interval(20.0, 30.0)]
 
-    monkeypatch.setattr("autocuts.cli.detect_sticky_intervals", fake_detect)
-    monkeypatch.setattr("autocuts.cli.detect_intervals", lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy")))
+    monkeypatch.setattr("autocuts.cli.detect_last_occurrence_intervals", fake_detect)
+    monkeypatch.setattr(
+        "autocuts.cli.detect_sticky_intervals",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("sticky")),
+    )
+    monkeypatch.setattr(
+        "autocuts.cli.detect_intervals",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy")),
+    )
     monkeypatch.setattr("autocuts.cli.export_group", lambda *a, **k: None)
 
     out = tmp_path / "out"
     rc = main([
         str(video), "-o", str(out),
-        "--hold-out", "25", "--similarity", "0.5", "--sample-fps", "2",
+        "--min-look", "10", "--similarity", "0.5", "--sample-fps", "2",
     ])
     assert rc == 0
-    assert seen["hold_out"] == 25
+    assert seen["min_look"] == 10
     assert seen["similarity"] == 0.5
     assert seen["sample_fps"] == 2
     manifest = json.loads((out / "reel_autocuts.json").read_text())
-    assert manifest["version"] == "0.2.0"
-    assert manifest["mode"] == "sticky"
-    assert manifest["hold_out"] == 25
+    assert manifest["version"] == "0.3.0"
+    assert manifest["mode"] == "last-occurrence"
+    assert manifest["min_look"] == 10
     assert manifest["dropped"] == []
-    # Short sticky stretches are kept. Excision is not the default path.
     assert [item["file"] for item in manifest["exports"]] == [
         "reel_scene_001.mp4",
         "reel_scene_002.mp4",
     ]
+    # The nested look is not excised from the parent file.
+    assert manifest["exports"][0]["ranges"] == [
+        {"start": 0.0, "end": 80.0, "duration": 80.0},
+    ]
+    assert manifest["exports"][1]["ranges"] == [
+        {"start": 20.0, "end": 30.0, "duration": 10.0},
+    ]
+
+
+def test_sticky_mode_still_available(tmp_path, monkeypatch):
+    video = tmp_path / "reel.mp4"
+    video.write_bytes(b"x")
+    seen = {}
+
+    def fake_detect(path, **kwargs):
+        seen.update(kwargs)
+        return [Interval(0.0, 40.0)]
+
+    monkeypatch.setattr("autocuts.cli.detect_sticky_intervals", fake_detect)
+    monkeypatch.setattr(
+        "autocuts.cli.detect_last_occurrence_intervals",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("last-occurrence")),
+    )
+    monkeypatch.setattr("autocuts.cli.export_group", lambda *a, **k: None)
+
+    out = tmp_path / "out"
+    rc = main([
+        str(video), "-o", str(out), "--mode", "sticky",
+        "--hold-out", "25", "--similarity", "0.5",
+    ])
+    assert rc == 0
+    assert seen["hold_out"] == 25
+    assert seen["similarity"] == 0.5
+    manifest = json.loads((out / "reel_autocuts.json").read_text())
+    assert manifest["mode"] == "sticky"
+    assert manifest["hold_out"] == 25
 
 
 def test_adaptive_mode_still_drops_and_stitches(tmp_path, monkeypatch):
@@ -90,6 +135,10 @@ def test_adaptive_mode_still_drops_and_stitches(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "autocuts.cli.detect_sticky_intervals",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("sticky")),
+    )
+    monkeypatch.setattr(
+        "autocuts.cli.detect_last_occurrence_intervals",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("last-occurrence")),
     )
     monkeypatch.setattr("autocuts.cli.export_group", lambda *a, **k: None)
 
@@ -122,7 +171,7 @@ def test_decode_failure_returns_1(tmp_path, monkeypatch):
     def boom(path, **kwargs):
         raise RuntimeError("no frames decoded")
 
-    monkeypatch.setattr("autocuts.cli.detect_sticky_intervals", boom)
+    monkeypatch.setattr("autocuts.cli.detect_last_occurrence_intervals", boom)
     assert main([str(video), "-o", str(tmp_path / "out")]) == 1
 
 
@@ -136,7 +185,7 @@ def test_cli_sticky_on_a_real_clip(tmp_path):
     blip_out = tmp_path / "blip_out"
     assert main([
         str(blip), "-o", str(blip_out),
-        "--hold-out", "15", "--copy",
+        "--mode", "sticky", "--hold-out", "15", "--copy",
     ]) == 0
     blip_manifest = json.loads((blip_out / "blip_autocuts.json").read_text())
     assert len(blip_manifest["exports"]) == 1
@@ -145,7 +194,7 @@ def test_cli_sticky_on_a_real_clip(tmp_path):
     cut_out = tmp_path / "cut_out"
     assert main([
         str(cut), "-o", str(cut_out),
-        "--hold-out", "15", "--similarity", "0.4", "--copy",
+        "--mode", "sticky", "--hold-out", "15", "--similarity", "0.4", "--copy",
     ]) == 0
     cut_manifest = json.loads((cut_out / "cut_autocuts.json").read_text())
     assert len(cut_manifest["exports"]) == 2
