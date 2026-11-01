@@ -15,7 +15,7 @@ from tests.synth import ffmpeg_available, write_color_video
 def test_version_matches_pyproject():
     text = Path(__file__).resolve().parents[1].joinpath("pyproject.toml").read_text()
     assert f'version = "{__version__}"' in text
-    assert __version__ == "0.3.1"
+    assert __version__ == "0.4.0"
 
 
 def test_help_documents_sticky_hold_out(capsys):
@@ -28,6 +28,7 @@ def test_help_documents_sticky_hold_out(capsys):
     assert "--hold-out" in out
     assert "last-occurrence" in out
     assert "sticky" in out
+    assert "dino" in out
     assert "--mode" in out
 
 
@@ -77,7 +78,7 @@ def test_default_mode_is_last_occurrence(tmp_path, monkeypatch):
     assert seen["similarity"] == 0.5
     assert seen["sample_fps"] == 2
     manifest = json.loads((out / "reel_autocuts.json").read_text())
-    assert manifest["version"] == "0.3.1"
+    assert manifest["version"] == "0.4.0"
     assert manifest["mode"] == "last-occurrence"
     assert manifest["min_look"] == 10
     assert manifest["dropped"] == []

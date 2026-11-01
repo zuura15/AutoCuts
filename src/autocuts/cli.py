@@ -7,6 +7,14 @@ import time
 from pathlib import Path
 
 from . import __version__
+from .dino import (
+    DEFAULT_DINO_BATCH,
+    DEFAULT_DINO_MODEL,
+    DEFAULT_DINO_SIMILARITY,
+    DINO_MODELS,
+    detect_dino_report,
+    format_dino_summary,
+)
 from .export import export_group, write_manifest
 from .last_occurrence import DEFAULT_MIN_LOOK, detect_last_occurrence_intervals
 from .logic import detect_intervals, drop_short, stitch_across_drops
@@ -19,7 +27,7 @@ from .sticky import (
     detect_sticky_intervals,
 )
 
-_MODES = ("last-occurrence", "sticky", "adaptive", "content")
+_MODES = ("last-occurrence", "sticky", "adaptive", "content", "dino")
 
 
 def _bounded_float(name: str, lo: float, hi: float):
@@ -31,6 +39,21 @@ def _bounded_float(name: str, lo: float, hi: float):
         if value < lo or value > hi:
             raise argparse.ArgumentTypeError(
                 f"{name} must be between {lo:g} and {hi:g} (got {value:g})"
+            )
+        return value
+
+    return parse
+
+
+def _bounded_int(name: str, lo: int, hi: int):
+    def parse(raw: str) -> int:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"{name} must be an integer") from exc
+        if value < lo or value > hi:
+            raise argparse.ArgumentTypeError(
+                f"{name} must be between {lo} and {hi} (got {value})"
             )
         return value
 
@@ -52,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  autocuts video.mp4 --min-look 15 --similarity 0.5\n"
             "  autocuts video.mp4 --mode sticky --hold-out 20\n"
             "  autocuts video.mp4 --mode adaptive --min-keep 4\n"
+            "  autocuts video.mp4 --mode dino -o ./out\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -63,8 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--mode", choices=_MODES, default=None,
         help=(
-            "last-occurrence (default), sticky, or adaptive/content "
-            "for the PySceneDetect path"
+            "last-occurrence (default), sticky, adaptive/content, "
+            "or dino (dry-run report, no scene files)"
         ),
     )
     p.add_argument(
@@ -76,8 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=_bounded_float("min-look", 1e-3, 600.0),
         default=None,
         help=(
-            "Last-occurrence only. Contiguous seconds a look must last to "
-            f"get its own file (default {DEFAULT_MIN_LOOK:g}). Shorter "
+            "Last-occurrence and dino. Contiguous seconds a look must last to "
+            f"get its own span (default {DEFAULT_MIN_LOOK:g}). Shorter "
             "stretches stay inside other scenes."
         ),
     )
@@ -96,9 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_bounded_float("similarity", 0.0, 1.0),
         default=None,
         help=(
-            "Last-occurrence and sticky. Minimum cosine similarity to a "
-            f"look's prototype (default {DEFAULT_SIMILARITY:g}). Lower "
-            "under-splits more."
+            "Minimum cosine similarity to a look's prototype. "
+            f"Default {DEFAULT_SIMILARITY:g} (last-occurrence, sticky) or "
+            f"{DEFAULT_DINO_SIMILARITY:g} (dino). Lower under-splits more."
         ),
     )
     p.add_argument(
@@ -106,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_bounded_float("sample-fps", 1e-3, 30.0),
         default=None,
         help=(
-            "Last-occurrence and sticky. Signature samples per second "
+            "Last-occurrence, sticky, and dino. Signature samples per second "
             f"(default {DEFAULT_SAMPLE_FPS:g})"
         ),
     )
@@ -125,6 +149,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--copy", action="store_true",
         help="Try stream-copy for single-range exports (faster, less precise)",
+    )
+    p.add_argument(
+        "--dino-model", choices=DINO_MODELS, default=DEFAULT_DINO_MODEL,
+        help=f"Dino only. DINOv2 backbone (default {DEFAULT_DINO_MODEL})",
+    )
+    p.add_argument(
+        "--dino-device", choices=("auto", "cpu", "cuda"), default="auto",
+        help="Dino only. auto uses CUDA when PyTorch can see a GPU (default auto)",
+    )
+    p.add_argument(
+        "--dino-batch", type=_bounded_int("dino-batch", 1, 64), default=None,
+        help=f"Dino only. Embedding batch size (default {DEFAULT_DINO_BATCH})",
     )
     p.add_argument("--version", action="version", version=f"autocuts {__version__}")
     return p
@@ -156,15 +192,46 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     hold_out = DEFAULT_HOLD_OUT if args.hold_out is None else args.hold_out
-    similarity = DEFAULT_SIMILARITY if args.similarity is None else args.similarity
+    if mode == "dino" and args.similarity is None:
+        similarity = DEFAULT_DINO_SIMILARITY
+    else:
+        similarity = DEFAULT_SIMILARITY if args.similarity is None else args.similarity
     sample_fps = DEFAULT_SAMPLE_FPS if args.sample_fps is None else args.sample_fps
     min_look = DEFAULT_MIN_LOOK if args.min_look is None else args.min_look
+    dino_batch = DEFAULT_DINO_BATCH if args.dino_batch is None else args.dino_batch
 
     print(f"AutoCuts {__version__}")
     print(f"input:  {video}")
     print(f"output: {out_dir}")
 
     t0 = time.time()
+    if mode == "dino":
+        print(
+            f"mode:   dino (dry-run)  model: {args.dino_model}  "
+            f"device: {args.dino_device}  min-look: {min_look:g}s  "
+            f"similarity: {similarity:g}  sample: {sample_fps:g} fps"
+        )
+        try:
+            report = detect_dino_report(
+                str(video),
+                min_look=min_look,
+                similarity=similarity,
+                sample_fps=sample_fps,
+                model_name=args.dino_model,
+                device=args.dino_device,
+                batch_size=dino_batch,
+                on_progress=_progress,
+            )
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(format_dino_summary(report))
+        report_path = out_dir / f"{video.stem}_dino.json"
+        write_manifest(report_path, report)
+        print(f"report → {report_path}")
+        print(f"done in {time.time() - t0:.1f}s (no scene files written)")
+        return 0
+
     dropped: list = []
     if mode == "last-occurrence":
         print(

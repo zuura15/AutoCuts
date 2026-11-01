@@ -1,6 +1,6 @@
 [project]
 name = "autocuts"
-version = "0.3.1"
+version = "0.4.0"
 description = "Local CLI that exports one span per lasting look, from its first appearance to its last, leaving inner junk in place."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+dino = ["torch>=2.2"]
 
 [project.scripts]
 autocuts = "autocuts.cli:main"

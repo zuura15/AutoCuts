@@ -11,6 +11,7 @@ own export, sitting inside the parent's first-to-last range.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, List, Sequence
 
 import numpy as np
@@ -46,7 +47,35 @@ def _ema(prototype: np.ndarray, sample: np.ndarray, alpha: float) -> np.ndarray:
     return mixed / norm
 
 
-def last_occurrence_scenes(
+@dataclass(frozen=True)
+class LookRun:
+    """One contiguous stretch assigned to a look."""
+
+    start: float
+    end: float
+    duration: float
+    first_index: int
+    last_index: int
+
+
+@dataclass(frozen=True)
+class LookGroup:
+    """First-to-last span of one look, plus the runs it was seen in."""
+
+    start: float
+    end: float
+    lasting: bool
+    creation_index: int
+    first_index: int
+    last_index: int
+    runs: tuple[LookRun, ...]
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+
+def group_looks(
     samples: Sequence[tuple[float, np.ndarray]],
     *,
     similarity: float = DEFAULT_SIMILARITY,
@@ -54,20 +83,19 @@ def last_occurrence_scenes(
     min_look: float = DEFAULT_MIN_LOOK,
     sample_interval: float = 1.0,
     duration: float | None = None,
-) -> List[Interval]:
-    """One interval per lasting look, each running first occurrence → last.
+) -> List[LookGroup]:
+    """Cluster samples into looks and span each one from first to last.
 
-    Samples are ``(time_seconds, signature)`` in order. A sample joins the
-    existing look whose prototype is most similar when that similarity is
-    at least ``similarity``; otherwise it opens a new look. The prototype
-    is a slow average of the samples that match it, same idea as sticky
-    mode, so a gradual zoom stays one look.
+    A sample joins the existing look whose prototype is most similar when
+    that similarity is at least ``similarity``; otherwise it opens a new
+    look. The prototype is a slow average of the samples that match it, so
+    a gradual zoom stays one look.
 
-    A look is exported only when some contiguous run of its samples lasts
-    at least ``min_look`` seconds. The exported range still runs from that
-    look's first sample to its last sample anywhere in the video, so a
-    later return pulls the middle back in. Shorter looks are omitted;
-    their time stays inside any longer span that already covers it.
+    ``lasting`` is true when some contiguous run lasts at least ``min_look``
+    seconds. The span still runs from the look's first sample to its last
+    sample anywhere later, so a return pulls the middle back in. Short
+    looks are returned too, with ``lasting`` false, so a caller can report
+    the fluff that stayed inside a parent.
     """
     if not 0.0 <= similarity <= 1.0:
         raise ValueError("similarity must be between 0 and 1")
@@ -112,6 +140,7 @@ def last_occurrence_scenes(
         assignment.append((t, best_i))
 
     max_run = [0.0] * len(looks)
+    runs_for: list[list[LookRun]] = [[] for _ in looks]
     index = 0
     total = len(assignment)
     while index < total:
@@ -124,22 +153,67 @@ def last_occurrence_scenes(
         length = (end_t - start_t) + sample_interval
         if length > max_run[look_i]:
             max_run[look_i] = length
+        run_end = end_t + sample_interval
+        if duration is not None:
+            run_end = min(run_end, float(duration))
+        if run_end > start_t:
+            runs_for[look_i].append(LookRun(
+                start=start_t,
+                end=run_end,
+                duration=run_end - start_t,
+                first_index=index,
+                last_index=end_index - 1,
+            ))
         index = end_index
 
-    spans: list[tuple[float, float, int]] = []
+    groups: list[LookGroup] = []
     for look_i, look in enumerate(looks):
-        if max_run[look_i] + 1e-6 < min_look:
-            continue
         first = float(look["times"][0])
         last = float(look["times"][-1])
         end = last + sample_interval
         if duration is not None:
             end = min(end, float(duration))
-        if end > first:
-            spans.append((first, end, look_i))
+        if end <= first:
+            continue
+        first_index = runs_for[look_i][0].first_index if runs_for[look_i] else 0
+        last_index = runs_for[look_i][-1].last_index if runs_for[look_i] else 0
+        groups.append(LookGroup(
+            start=first,
+            end=end,
+            lasting=max_run[look_i] + 1e-6 >= min_look,
+            creation_index=look_i,
+            first_index=first_index,
+            last_index=last_index,
+            runs=tuple(runs_for[look_i]),
+        ))
 
-    spans.sort(key=lambda item: (item[0], item[2]))
-    return [Interval(start, end) for start, end, _look_i in spans]
+    groups.sort(key=lambda item: (item.start, item.creation_index))
+    return groups
+
+
+def last_occurrence_scenes(
+    samples: Sequence[tuple[float, np.ndarray]],
+    *,
+    similarity: float = DEFAULT_SIMILARITY,
+    prototype_alpha: float = DEFAULT_PROTOTYPE_ALPHA,
+    min_look: float = DEFAULT_MIN_LOOK,
+    sample_interval: float = 1.0,
+    duration: float | None = None,
+) -> List[Interval]:
+    """One interval per lasting look, each running first occurrence → last.
+
+    Shorter looks are omitted. Their time stays inside any longer span
+    that already covers it.
+    """
+    grouped = group_looks(
+        samples,
+        similarity=similarity,
+        prototype_alpha=prototype_alpha,
+        min_look=min_look,
+        sample_interval=sample_interval,
+        duration=duration,
+    )
+    return [Interval(group.start, group.end) for group in grouped if group.lasting]
 
 
 def detect_last_occurrence_intervals(
