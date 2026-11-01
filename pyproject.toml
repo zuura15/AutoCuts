@@ -1,7 +1,7 @@
 [project]
 name = "autocuts"
-version = "0.1.0"
-description = "Local CLI: split compilation videos into scenes, drop short pan-outs, keep the main action."
+version = "0.2.0"
+description = "Local CLI that splits compilation videos into sticky scenes, under-splitting through brief zooms and lighting blips."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -9,7 +9,11 @@ authors = [{ name = "zuura15" }]
 dependencies = [
   "scenedetect>=0.6.4",
   "opencv-python-headless>=4.8",
+  "numpy>=1.24",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
 
 [project.scripts]
 autocuts = "autocuts.cli:main"
@@ -20,3 +24,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

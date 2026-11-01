@@ -42,7 +42,7 @@ def detect_intervals(
     scenes = sm.get_scene_list()
     out: List[Interval] = []
     for a, b in scenes:
-        out.append(Interval(a.get_seconds(), b.get_seconds()))
+        out.append(Interval(a.seconds, b.seconds))
     return out
 
 

@@ -1,14 +1,28 @@
 # AutoCuts
 
-Local CLI that splits compilation videos into individual scenes, **drops short pan-outs** (a few seconds away from the main action), and keeps the main stretches. Built on [PySceneDetect](https://www.scenedetect.com/) + ffmpeg. Everything runs on your machine.
+Local CLI that splits compilation videos into scenes. The default **sticky** mode under-splits on purpose: a brief zoom or lighting blip that comes back does not end a scene. Leaving a little junk inside a scene is fine. Export uses ffmpeg. Everything runs on your machine.
 
-## Why not only PySceneDetect?
+## Sticky mode (default)
 
-PySceneDetect already detects cuts and can enforce a minimum scene length. AutoCuts adds the workflow we wanted for messy compilations (including dark / night-vision footage):
+Sticky mode samples the picture about once a second and keeps a cheap hue/saturation signature of the current stretch (brightness is ignored). That prototype is a slow average of samples that still match it, so a pan or a gradual zoom can drift without a cut. A scene closes only when samples stay unlike the prototype for a **hold-out** window (default 20s, allowed range 15–30s).
 
-- treat sub-~4s digressions as **bursts to remove**, not as their own clips
-- when a short burst sits between two longer stretches, **excise it and stitch** those stretches into one output file
-- sensible defaults for dark footage (`adaptive` detector)
+```bash
+autocuts /path/to/video.mp4
+# writes to /path/to/AutoCuts/
+
+autocuts video.mp4 -o ./out --hold-out 25 --similarity 0.5
+```
+
+`--similarity` is the cosine threshold (default 0.55). Lower it to under-split more. Two stretches with a similar palette may stay one file; that is the tradeoff.
+
+## Legacy PySceneDetect path
+
+`--mode adaptive` or `--mode content` keeps the previous detector: drop bursts shorter than `--min-keep` (default 4s) and stitch the long stretches on either side. `--detector` is an alias of `--mode`.
+
+```bash
+autocuts video.mp4 --mode adaptive --min-keep 4
+autocuts video.mp4 --mode content --no-stitch
+```
 
 ## Install
 
@@ -17,16 +31,6 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 # needs ffmpeg on PATH
-```
-
-## Usage
-
-```bash
-autocuts /path/to/video.mp4
-# writes to /path/to/AutoCuts/ by default
-
-autocuts video.mp4 -o ./out --min-keep 4
-autocuts video.mp4 --detector content --no-stitch
 ```
 
 ## License
